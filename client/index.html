@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang='en'>
+<head>
+    <meta charset='UTF-8'>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title></title>
+</head>
+<script>
+var TAU = Math.PI * 2;
+var accuracyFactor = 3;
+var minRange = 0.02 * Math.max(screen.width, screen.height);
+var maxTap = 300;
+
+var touchPos = function(touch) {
+    return {
+        x: touch.pageX,
+        y: touch.pageY,
+    };
+};
+
+var throttle = function(fn, threshold) {
+    var Idle = 0;
+    var Cooldown = 1;
+    var Pending = 2;
+
+    threshold = threshold || 200;
+    var toHandle;
+    var state = Idle;
+
+    var relax = function() {
+        if (state === Cooldown) {
+            state = Idle;
+            clearInterval(toHandle);
+        } else if (state === Pending) {
+            state = Cooldown;
+            fn();
+        }
+    };
+
+    return function() {
+        if (state === Idle) {
+            toHandle = setInterval(relax, threshold);
+            state = Cooldown;
+            fn();
+        } else {
+            state = Pending;
+        }
+    };
+};
+
+var send = function(key) {
+    return fetch('/keypress', {
+        'method': 'post',
+        'headers': {'content-type': 'application/json'},
+        'body': JSON.stringify({'key': key}),
+    });
+};
+
+class ValueBuffer {
+    constructor(step, up, down) {
+        this.value = 0;
+        this.step = step;
+        this.upKey = up;
+        this.downKey = down;
+        this.sender = throttle(this.rawSender.bind(this), 100);
+    }
+    rawSender() {
+        var step;
+        var key;
+        if (this.value > 0) {
+            step = this.step;
+            key = this.upKey;
+        } else {
+            step = -this.step;
+            key = this.downKey;
+        }
+        var step = Math.sign(this.value) * this.step;
+        while (Math.abs(this.value) > Math.abs(this.step)) {
+            this.value -= step;
+            send(key);
+        }
+    }
+    push(delta) {
+        this.value += delta;
+        this.sender();
+    }
+}
+
+var activeTouches = {};
+var volumeBuf = new ValueBuffer(0.02, 'vol+', 'vol-');
+var seekBuf = new ValueBuffer(0.02, 'seek+5', 'seek-5');
+
+var handleMove = function(touch, pos) {
+    var delta = {
+        x: pos.x - touch.prev.x,
+        y: pos.y - touch.prev.y,
+    };
+
+    var range = Math.hypot(delta.x, delta.y);
+    if (range < minRange) { return; }
+
+    if (Math.abs(delta.x) > accuracyFactor * Math.abs(delta.y)) {
+        touch.prev = pos;
+        var seekPct = delta.x / screen.width;
+        if (touch.seekOnly) {
+            // go slower as we go down, as slow as 10 times
+            var factor = 1 + (pos.y / screen.height) * 9;
+            seekPct /= factor;
+        }
+        console.log('seek', seekPct);
+        seekBuf.push(seekPct);
+    }
+    if (Math.abs(delta.y) > accuracyFactor * Math.abs(delta.x)) {
+        touch.prev = pos;
+        if (!touch.seekOnly) {
+            var volumePct = -delta.y / screen.height;
+            console.log('volume', volumePct);
+            volumeBuf.push(volumePct);
+        }
+    }
+};
+
+var handleTap = function(touch, pos, time) {
+    var delta = {
+        x: pos.x - touch.start.x,
+        y: pos.y - touch.start.y,
+    };
+    var deltaTime = time - touch.startTime;
+    var range = Math.hypot(delta.x, delta.y);
+    if (range > minRange || deltaTime > maxTap) { return; }
+    console.log('play/pause');
+    send('play/pause');
+};
+
+var handleTouch = function(event) {
+    var changedTouches = Array.from(event.changedTouches);
+    if (event.type === 'touchend' || event.type === 'touchcancel') {
+        changedTouches.forEach(function (touch) {
+            var pos = touchPos(touch);
+            handleTap(activeTouches[touch.identifier], pos, Date.now());
+            delete activeTouches[touch.identifier];
+        });
+        return;
+    }
+
+    if (event.type === 'touchstart') {
+        changedTouches.forEach(function (touch) {
+            var pos = touchPos(touch);
+            activeTouches[touch.identifier] = {
+                start: pos,
+                startTime: Date.now(),
+                seekOnly: pos.y < 100,
+                prev: pos,
+            };
+        });
+        return;
+    }
+
+    if (event.type === 'touchmove') {
+        event.preventDefault();
+        changedTouches.forEach(function (touch) {
+            var thisTouch = activeTouches[touch.identifier];
+            var pos = touchPos(touch);
+            handleMove(thisTouch, pos);
+        });
+        return;
+    }
+};
+
+var init = function() {
+    var el = document.getElementById('touchzone');
+    el.addEventListener('touchstart', handleTouch, false);
+    el.addEventListener('touchend', handleTouch, false);
+    el.addEventListener('touchcancel', handleTouch, false);
+    el.addEventListener('touchmove', handleTouch, false);
+};
+window.addEventListener('load', init);
+</script>
+<style>
+html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+}
+body {
+    display: flex;
+    flex-direction: column;
+}
+#touchzone {
+    flex: 1;
+}
+#controls {
+    flex-basis: 100px;
+    flex: 0;
+}
+</style>
+<body>
+<div id="touchzone"></div>
+</body>
+</html>
